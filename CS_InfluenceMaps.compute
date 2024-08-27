@@ -1,0 +1,214 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+#define DIVISION 0
+#define MULTIPLICATION 1
+#define SUBTRACTION 2
+#define SUBTRACTIONABS 3
+#define ADDITION 4
+
+#define ENEMYBUFFER 0
+#define ALLYBUFFER 1
+#define COMPLETEBUFFER 2
+#define TENSIONBUFFER 3
+#define DIRECTEDBUFFER 4
+
+#define ENEMYMASK -1
+#define ALLYMASK 1
+
+RWStructuredBuffer<float> GridDataBuffer;
+RWStructuredBuffer<float> InfluenceBuffer[5]; //Enemy, Ally, Complete, Tension, Directed (TO ADD: Obstruction Map on IDX 5 or own compute shader for obstruction map?
+//could add multiple versions like terrain roughness etc.)
+
+int _gridWidth;
+int _gridHeight;
+int _influenceDistance;
+
+float maxInfluence = 0;
+
+uint stride;
+
+void GenerateBaseInfluenceMap
+(int _idX, int _idY, int _gridWidth, int _gridHeight, int _generationMask, int _influenceDistance, RWStructuredBuffer<float> _resultBuffer);
+
+void CalculateNewInfluenceMap
+(
+int _x, int _y, int _gridWidth, int _gridHeight,
+RWStructuredBuffer<float> _mapA, RWStructuredBuffer<float> _mapB, RWStructuredBuffer<float> _resultBuffer, int _operation
+);
+
+void CalculateNewInfluenceMap
+(
+int _x, int _y, int _gridWidth, int _gridHeight,
+RWStructuredBuffer<float> _map, float _value, RWStructuredBuffer<float> _resultBuffer, int _operation
+);
+
+bool IsPositionInBounds(int _x, int _y, int _width, int _height);
+float Division(float _a, float _b);
+float Multiplication(float _a, float _b);
+float Subtraction(float _a, float _b);
+float SubtractionAbsB(float _a, float _b);
+float Addition(float _a, float _b);
+
+
+[numthreads(10,10,1)] 
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    //Base influence map
+        GenerateBaseInfluenceMap(id.x, id.y, _gridWidth, _gridHeight, ENEMYMASK, _influenceDistance, InfluenceBuffer[ENEMYBUFFER]);
+        GenerateBaseInfluenceMap(id.x, id.y, _gridWidth, _gridHeight, ALLYMASK, _influenceDistance, InfluenceBuffer[ALLYBUFFER]);
+    
+        GroupMemoryBarrierWithGroupSync();
+    
+    //Ally and enemy map
+        CalculateNewInfluenceMap(id.x, id.y, _gridWidth, _gridHeight, InfluenceBuffer[ENEMYBUFFER], maxInfluence, InfluenceBuffer[ENEMYBUFFER], DIVISION);
+        CalculateNewInfluenceMap(id.x, id.y, _gridWidth, _gridHeight, InfluenceBuffer[ALLYBUFFER], maxInfluence, InfluenceBuffer[ALLYBUFFER], DIVISION);
+    
+        GroupMemoryBarrierWithGroupSync();
+    
+    //Complete influence map
+        CalculateNewInfluenceMap(id.x, id.y, _gridWidth, _gridHeight, InfluenceBuffer[ALLYBUFFER], InfluenceBuffer[ENEMYBUFFER], InfluenceBuffer[COMPLETEBUFFER], SUBTRACTION);
+    
+    //Tension map
+        CalculateNewInfluenceMap(id.x, id.y, _gridWidth, _gridHeight, InfluenceBuffer[ALLYBUFFER], InfluenceBuffer[ENEMYBUFFER], InfluenceBuffer[TENSIONBUFFER], MULTIPLICATION);
+
+        GroupMemoryBarrierWithGroupSync();
+    
+    //Directed vulnerability map
+        CalculateNewInfluenceMap(id.x, id.y, _gridWidth, _gridHeight, InfluenceBuffer[TENSIONBUFFER], InfluenceBuffer[COMPLETEBUFFER], InfluenceBuffer[DIRECTEDBUFFER], SUBTRACTIONABS);
+    }
+
+ 
+//Influence calculations
+void GenerateBaseInfluenceMap
+(
+int _idX, int _idY, int _gridWidth, int _gridHeight, int _generationMask, int _influenceDistance, RWStructuredBuffer<float> _resultBuffer
+)
+{ 
+    int index = _idX + _idY * _gridWidth;
+    
+    if (GridDataBuffer[index] == _generationMask)
+    {
+        for (int dy = -_influenceDistance; dy <= _influenceDistance; dy++)
+        {
+            for (int dx = -_influenceDistance; dx <= _influenceDistance; dx++)
+            {
+                int wholeDistance = abs(dx) + abs(dy);
+
+                if (wholeDistance <= _influenceDistance)
+                {
+                    int currentX = _idX + dx;
+                    int currentY = _idY + dy;
+
+                    if (IsPositionInBounds(currentX, currentY, _gridWidth, _gridHeight))
+                    {
+                        float distancePercent = wholeDistance / (float) _influenceDistance;
+                        float influence = 1.0 - (1.0 * distancePercent);
+
+                        /////////////////////////////////////////////////
+                        //THIS LINE THROWS AN ERROR AND I DONT KNOW WHY!
+                        //InterlockedAdd(asint( _resultBuffer[index]), asint(influence)); 
+                        _resultBuffer[index] += (int) influence; 
+                        //FUCK THIS SHIT!
+                        /////////////////////////////////////////////////
+                         
+                        //maxInfluence = asfloat((int) InterlockedMax(asint(maxInfluence), asint(_resultBuffer[index])));
+                        maxInfluence = max(asint(maxInfluence), asint(_resultBuffer[index]));
+
+                    }
+                }
+            }
+        }
+    }
+}
+
+void CalculateNewInfluenceMap
+(
+int _x, int _y, int _gridWidth, int _gridHeight,
+RWStructuredBuffer<float> _mapA, RWStructuredBuffer<float> _mapB, RWStructuredBuffer<float> _resultBuffer, int _operation
+)
+    {  
+        int index = _x + _y * _gridWidth;
+    
+        if (_operation == 0)
+        {
+        _resultBuffer[index] = Division(_mapA[index], _mapB[index]);
+        
+        }
+        else if (_operation == 1)
+        {
+        _resultBuffer[index] = Multiplication(_mapA[index], _mapB[index]);
+        
+        }
+        else if (_operation == 2)
+        {
+        _resultBuffer[index] = Subtraction(_mapA[index], _mapB[index]);
+        
+        }
+        else if (_operation == 3)
+        {
+        _resultBuffer[index] = SubtractionAbsB(_mapA[index], _mapB[index]);
+    }
+        else
+        {
+        _resultBuffer[index] = Addition(_mapA[index], _mapB[index]);
+    }
+    }
+
+void CalculateNewInfluenceMap
+(
+int _x, int _y, int _gridWidth, int _gridHeight,
+RWStructuredBuffer<float> _map, float _value, RWStructuredBuffer<float> _resultBuffer, int _operation
+)
+    {
+        int index = _x + _y * _gridWidth;
+    
+        if (_operation == 0)
+        {
+        _resultBuffer[index] = Division(_map[index], _value);
+        }
+        else if (_operation == 1)
+        {
+        _resultBuffer[index] = Multiplication(_map[index], _value);
+        }
+        else if (_operation == 2)
+        {
+        _resultBuffer[index] = Subtraction(_map[index], _value);
+        }
+        else
+        {
+        _resultBuffer[index] = Addition(_map[index], _value);
+        }
+    }
+
+
+//Helper functions
+bool IsPositionInBounds(int _x, int _y, int _width, int _height)
+{
+    return _x >= 0 && _x < _width && _y >= 0 && _y < _height;
+}
+
+float Division(float _a, float _b)
+{
+    return _a / _b;
+}
+
+float Multiplication(float _a, float _b)
+{
+    return _a * _b;
+}
+
+float Subtraction(float _a, float _b)
+{
+    return _a - _b;
+}
+
+float SubtractionAbsB(float _a, float _b)
+{
+    return _a - abs(_b);
+}
+
+float Addition(float _a, float _b)
+{
+    return _a + _b;
+}

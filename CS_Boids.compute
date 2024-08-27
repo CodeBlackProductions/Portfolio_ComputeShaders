@@ -1,0 +1,281 @@
+﻿#pragma kernel CSMain
+
+//New boids get added in FormationController, Wheights get updated by TacticalController - where to update position etc.? BoidController?
+//Get all Updates to go through Dispatcher as different functions?
+
+struct Boid
+{ 
+ float3 position;
+ float3 direction;
+ float allyAlignmentWeight;
+ float allyCohesionWeight;
+ float allySeparationWeight;
+ float3 formationPos;
+ float formationCohesionWeight; 
+ int nearbyEnemiesBufferIndex;
+ int nearbyEnemiesLength;
+ int nearbyAlliesBufferIndex;
+ int nearbyAlliesLength;
+ float visionRange;
+ float enemyCohesionWeight;
+ float enemySeparationWeight;
+ float3 actorMovTargetPos;
+ float targetCohesionWeight;
+ float obstacleAvoidanceFactor;
+ float obstacleAvoidanceWeight;
+};
+ 
+struct FlockingData
+{
+    float3 direction;
+};
+
+//RWStructuredBuffer<float3> obstaclePositions; - probably redundant since information from influence maps will be used
+
+RWStructuredBuffer<Boid> boidBuffer;
+RWStructuredBuffer<int> nearbyBoidsBuffer;
+RWStructuredBuffer<FlockingData> resultBuffer;
+
+//still need to add inlfuence map data and change calculations based on that
+
+//uint obstaclesCount;
+
+uint stride;
+Boid actor;
+
+void AllyAlignment(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex);
+void AllyCohesion(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex);
+void AllySeparation(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex);
+//void FormationCohesion();
+void EnemyCohesion(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex);
+void EnemySeparation(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex);
+void TargetCohesion();
+//void ObstacleAvoidance();
+
+float3 CalculateCohesion(float3 _actorLocation, float3 _targetLocation, float _weight, bool _useDistance, bool _invertDistance);
+float3 CalculateAlignment(float3 _actorDirection, float3 _targetDirection, float3 _actorLocation, float3 _targetLocation, float _weight, bool _useDistance, bool _invertDistance);
+float CalculateDistanceMod(float3 _targetLocation, float3 _actorLocation, float _visionRange);
+
+void UpdateResults(RWStructuredBuffer<FlockingData> _resultBuffer, uint _id);
+
+//verwenden der distance für alles
+
+
+
+
+
+
+
+
+//Main function
+[numthreads(1, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    //obstaclePositions.GetDimensions(obstaclesCount, stride);
+    
+    actor = boidBuffer[id.x];
+    
+    actor.direction = float3(0, 0, 0);
+    
+    TargetCohesion();
+    
+    if (actor.nearbyAlliesLength > 0)
+    {
+        AllyAlignment(boidBuffer, actor.nearbyAlliesLength, id.x);
+        AllyCohesion(boidBuffer, actor.nearbyAlliesLength, id.x);
+        AllySeparation(boidBuffer, actor.nearbyAlliesLength, id.x);
+    }
+    //FormationCohesion();
+    
+    if (actor.nearbyEnemiesLength > 0)
+    {
+        EnemyCohesion(boidBuffer, actor.nearbyEnemiesLength, id.x);
+        EnemySeparation(boidBuffer, actor.nearbyEnemiesLength, id.x); //--> TODO: ADD with weight 0; can be pushed to make units run away when low
+    }
+    
+    //ObstacleAvoidance();
+
+    actor.direction = normalize(actor.direction);
+    
+    UpdateResults(resultBuffer, id.x);
+    
+    GroupMemoryBarrierWithGroupSync(); //Ensure sync of threads before writing new data into buffer -> No calculations based on newer values than others
+
+    boidBuffer[id.x] = actor;
+}
+
+
+//Flocking calculations
+void AllyAlignment(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex)
+{
+    float3 alignment = float3(0, 0, 0);
+
+    for (int i = 0; i < _boidCount; i++)
+    {
+        Boid target = _targetBuffer[nearbyBoidsBuffer[actor.nearbyAlliesBufferIndex + i]];
+        alignment += CalculateAlignment(actor.direction, target.direction, actor.position, target.position, actor.allyAlignmentWeight, true, true);
+    }
+    alignment /= _boidCount;
+
+    actor.direction += alignment;
+}
+
+void AllyCohesion(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex)
+{
+    float3 cohesion = float3(0, 0, 0);
+
+    for (int i = 0; i < _boidCount; i++)
+    {
+        Boid target = _targetBuffer[nearbyBoidsBuffer[actor.nearbyAlliesBufferIndex + i]];
+        cohesion += CalculateCohesion(actor.position, target.position, actor.allyCohesionWeight, true, false);
+    }
+    cohesion /= _boidCount;
+    
+    actor.direction += cohesion;
+}
+
+void AllySeparation(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex)
+{
+    float3 separation = float3(0, 0, 0);
+    float3 cohesion = float3(0, 0, 0);
+
+    for (int i = 0; i < _boidCount; i++)
+    {
+        Boid target = _targetBuffer[nearbyBoidsBuffer[actor.nearbyAlliesBufferIndex + i]];
+        float3 temp = CalculateCohesion(actor.position, target.position, actor.allySeparationWeight, true, true);
+        cohesion += temp;
+    }
+    cohesion /= _boidCount;
+    separation = cohesion * -1;
+    
+    actor.direction += separation;
+}
+
+//void FormationCohesion()
+//{
+//    actor.direction += CalculateCohesion(actor.position, actor.formationPos, actor.formationCohesionWeight, actor.speed, 0);
+//}
+
+void EnemyCohesion(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex)
+{
+    float3 cohesion = float3(0, 0, 0);
+
+    for (int i = 0; i < _boidCount; i++)
+    {
+        Boid target = _targetBuffer[nearbyBoidsBuffer[actor.nearbyEnemiesBufferIndex + i]];
+        cohesion += CalculateCohesion(actor.position, target.position, actor.enemyCohesionWeight, true, false);
+    }
+    cohesion /= _boidCount;
+    
+    actor.direction += cohesion;
+}
+
+void EnemySeparation(RWStructuredBuffer<Boid> _targetBuffer, int _boidCount, int _boidIndex)
+{
+    float3 cohesion = float3(0, 0, 0);
+    float3 separation = float3(0, 0, 0);
+    
+    for (int i = 0; i < _boidCount; i++)
+    {
+        Boid target = _targetBuffer[nearbyBoidsBuffer[actor.nearbyEnemiesBufferIndex + i]];
+        cohesion += CalculateCohesion(actor.position, target.position, actor.enemySeparationWeight, true, true);
+    }
+    cohesion /= _boidCount;
+    separation = cohesion * -1;
+    
+    actor.direction += separation;
+}
+
+void TargetCohesion()
+{
+    actor.direction += CalculateCohesion(actor.position, actor.actorMovTargetPos, actor.targetCohesionWeight, true, false);
+}
+
+//void ObstacleAvoidance()
+//{
+//    float3 avoidance = float3(0,0,0);
+    
+//    for (uint i = 0; i < obstaclesCount; i++)
+//    {
+//        float dist = distance(obstaclePositions[i], actor.position);
+//        dist = clamp(dist, 0.0f, actor.visionRange);
+//        dist = dist / actor.visionRange;
+//        dist = (1 - dist);
+//        dist = max(0.0f, dist);
+//        dist *= actor.obstacleAvoidanceFactor;
+
+//        float3 dir = obstaclePositions[i] - actor.position;
+//        dir = normalize(dir);
+//        dir = max(0, dir);
+//        avoidance += dir * dist;
+//    }
+    
+//    avoidance = normalize(avoidance);
+//    avoidance = max(0, avoidance);
+//    avoidance *= -1;
+//    actor.direction += avoidance * (actor.speed * actor.obstacleAvoidanceWeight);
+//}
+
+
+//Helper functions
+float3 CalculateCohesion(float3 _actorLocation, float3 _targetLocation, float _weight, bool _useDistance, bool _invertDistance)
+{
+    float3 cohesion = float3(0, 0, 0);
+    float distanceMod = 0;
+    
+    cohesion = _targetLocation - _actorLocation;
+    if (_useDistance)
+    {
+        if (_invertDistance)
+        {
+            distanceMod = 1 - CalculateDistanceMod(_targetLocation, _actorLocation, actor.visionRange);
+        }
+        else
+        {
+            distanceMod = CalculateDistanceMod(_targetLocation, _actorLocation, actor.visionRange);
+        }
+    }
+    cohesion = cohesion * (_weight * distanceMod);
+    return cohesion;
+}
+
+float3 CalculateAlignment(float3 _actorDirection, float3 _targetDirection, float3 _actorLocation, float3 _targetLocation, float _weight, bool _useDistance, bool _invertDistance)
+{
+    float3 alignment = float3(0, 0, 0);
+    float distanceMod = 0;
+    
+    alignment = _actorDirection + _targetDirection;
+    
+    if (_useDistance)
+    {
+        if (_invertDistance)
+        {
+            distanceMod = 1 - CalculateDistanceMod(_targetLocation, _actorLocation, actor.visionRange);
+        }
+        else
+        {
+            distanceMod = CalculateDistanceMod(_targetLocation, _actorLocation, actor.visionRange);
+        }
+    }
+    
+    alignment = alignment * (_weight * distanceMod);
+    
+    return alignment;
+
+}
+
+float CalculateDistanceMod(float3 _targetLocation, float3 _actorLocation, float _visionRange)
+{
+    float dist = distance(_targetLocation, _actorLocation);
+    dist = clamp(dist, 0.0f, _visionRange);
+    dist = dist / _visionRange;
+    
+    return dist;
+}
+
+
+//Data management
+void UpdateResults(RWStructuredBuffer<FlockingData> _resultBuffer, uint _id)
+{
+    _resultBuffer[_id].direction = actor.direction;
+}
